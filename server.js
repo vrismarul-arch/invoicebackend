@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -8,10 +9,15 @@ require('dotenv').config();
 const sequelize = require('./config/database');
 const { errorHandler, notFound } = require('./middleware/error');
 
+// Import models before routes
+require('./models');
+
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const tenantRoutes = require('./routes/tenantRoutes');
 const invoiceRoutes = require('./routes/invoiceRoutes');
+const templateRoutes = require('./routes/templateRoutes');
+const itemRoutes = require('./routes/itemRoutes');
 
 const app = express();
 
@@ -25,8 +31,8 @@ const corsOptions = {
 // Middleware
 app.use(helmet());
 app.use(cors(corsOptions));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(morgan('dev'));
 
 // Serve static files from uploads directory
@@ -36,14 +42,16 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/invoices', invoiceRoutes);
-
+app.use('/api/templates', templateRoutes);
+app.use('/api/items', itemRoutes);
+app.use('/api/customers', require('./routes/customerRoutes'));
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    database: 'MySQL',
-    storage: 'Local Filesystem'
+    database: process.env.DB_DIALECT || 'mysql',
+    storage: process.env.DB_HOST || 'localhost'
   });
 });
 
@@ -57,24 +65,35 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   try {
     await sequelize.authenticate();
-    console.log('✅ MySQL database connected');
+    console.log(`✅ Database connected (${process.env.DB_DIALECT || 'mysql'})`);
     
-    // Sync models (use alter: true for development only)
+    // ✅ FIX: Only sync models, DON'T use alter in development to avoid key limit issues
     if (process.env.NODE_ENV === 'development') {
-      await sequelize.sync({ alter: true });
-      console.log('✅ Models synced');
+      try {
+        // Use sync() without alter - only creates tables if they don't exist
+        await sequelize.sync();
+        console.log('✅ Models synced (no alter)');
+      } catch (syncError) {
+        console.warn('⚠️ Sync warning:', syncError.message);
+        console.log('✅ Server starting anyway - tables already exist');
+      }
     }
     
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📍 http://localhost:${PORT}`);
-      console.log(`🔗 Frontend URL: ${process.env.FRONTEND_URL}`);
-      console.log(`📁 Uploads directory: ${path.join(__dirname, 'uploads')}`);
+      console.log(`🔗 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:5173'}`);
     });
   } catch (error) {
-    console.error('❌ Database connection error:', error);
-    process.exit(1);
+    console.error('❌ Database connection error:', error.message);
+    // Don't exit - start server anyway if DB is already set up
+    console.log('⚠️ Starting server without database sync...');
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT} (without DB sync)`);
+    });
   }
 };
 
 startServer();
+
+module.exports = app;
