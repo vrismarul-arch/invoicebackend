@@ -1,7 +1,8 @@
+// models/Invoice.js
+
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/database');
-const User = require('./User');
-const Tenant = require('./Tenant');
+const Template = require('./Template');
 
 const Invoice = sequelize.define('Invoice', {
   id: {
@@ -9,110 +10,155 @@ const Invoice = sequelize.define('Invoice', {
     defaultValue: DataTypes.UUIDV4,
     primaryKey: true
   },
+
   invoice_number: {
     type: DataTypes.STRING(50),
     allowNull: false,
     unique: true
   },
-  client_name: {
-    type: DataTypes.STRING(255),
-    allowNull: false
-  },
-  client_email: {
-    type: DataTypes.STRING(255),
-    allowNull: false,
-    validate: {
-      isEmail: true
-    }
-  },
-  client_company: {
-    type: DataTypes.STRING(255),
-    allowNull: true
-  },
+
+  client_name: DataTypes.STRING(255),
+  client_email: DataTypes.STRING(255),
+  client_company: DataTypes.STRING(255),
+
   client_address: {
     type: DataTypes.TEXT,
     allowNull: true
   },
+
   client_gst: {
     type: DataTypes.STRING(50),
-    allowNull: true
+    defaultValue: ''
   },
-  amount: {
-    type: DataTypes.DECIMAL(10, 2),
-    allowNull: false,
-    validate: {
-      min: 0
-    }
-  },
-  tax_amount: {
-    type: DataTypes.DECIMAL(10, 2),
-    defaultValue: 0
-  },
-  total_amount: {
-    type: DataTypes.DECIMAL(10, 2),
-    allowNull: false
-  },
-  currency: {
-    type: DataTypes.STRING(3),
-    defaultValue: 'USD'
-  },
-  status: {
-    type: DataTypes.ENUM('draft', 'sent', 'paid', 'overdue', 'cancelled'),
-    defaultValue: 'draft'
-  },
-  due_date: {
-    type: DataTypes.DATE,
-    allowNull: false
-  },
-  issue_date: {
-    type: DataTypes.DATE,
-    defaultValue: DataTypes.NOW
-  },
-  paid_at: {
-    type: DataTypes.DATE,
-    allowNull: true
-  },
+
+  client_phone: DataTypes.STRING(30),
+
   items: {
     type: DataTypes.JSON,
     defaultValue: []
   },
+
+  amount: {
+    type: DataTypes.DECIMAL(12, 2),
+    defaultValue: 0
+  },
+
+  subtotal: {
+    type: DataTypes.DECIMAL(12, 2),
+    defaultValue: 0
+  },
+
+  tax_rate: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 18
+  },
+
+  tax_amount: {
+    type: DataTypes.DECIMAL(12, 2),
+    defaultValue: 0
+  },
+
+  discount: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 0
+  },
+
+  discount_amount: {
+    type: DataTypes.DECIMAL(12, 2),
+    defaultValue: 0
+  },
+
+  taxable_value: {
+    type: DataTypes.DECIMAL(12, 2),
+    defaultValue: 0
+  },
+
+  shipping_charge: {
+    type: DataTypes.DECIMAL(12, 2),
+    defaultValue: 0
+  },
+
+  total_amount: {
+    type: DataTypes.DECIMAL(12, 2),
+    defaultValue: 0
+  },
+
+  currency: {
+    type: DataTypes.STRING(10),
+    defaultValue: 'INR'
+  },
+
+  place_of_supply: {
+    type: DataTypes.STRING(100),
+    defaultValue: ''
+  },
+
+  shipping_address: DataTypes.TEXT,
+
+  terms: {
+    type: DataTypes.TEXT,
+    defaultValue: ''
+  },
+
   notes: {
     type: DataTypes.TEXT,
-    allowNull: true
+    defaultValue: ''
   },
+
+  status: {
+    type: DataTypes.STRING(20),
+    defaultValue: 'draft'
+  },
+
+  due_date: DataTypes.DATE,
+  issue_date: DataTypes.DATE,
+  paid_at: DataTypes.DATE,
+
+  upi_id: DataTypes.STRING(100),
+
+  upi_payee_name: {
+    type: DataTypes.STRING(255),
+    defaultValue: ''
+  },
+
+  upi_description: {
+    type: DataTypes.STRING(255),
+    defaultValue: 'Invoice payment'
+  },
+
+  upi_qr_url: DataTypes.STRING(500),
+  upi_transaction_id: DataTypes.STRING(100),
+  upi_payment_status: DataTypes.STRING(20),
+  upi_payment_date: DataTypes.DATE,
+
+  template_id: DataTypes.UUID,
+
   tenant_id: {
     type: DataTypes.UUID,
-    allowNull: false,
-    references: {
-      model: 'tenants',
-      key: 'id'
-    }
+    allowNull: false
   },
-  created_by: {
-    type: DataTypes.UUID,
-    allowNull: false,
-    references: {
-      model: 'users',
-      key: 'id'
-    }
-  }
+
+  created_by: DataTypes.UUID
+
 }, {
   tableName: 'invoices',
+
   timestamps: true,
-  underscored: true,
-  hooks: {
-    beforeCreate: async (invoice) => {
-      if (!invoice.invoice_number) {
-        const count = await Invoice.count({ where: { tenant_id: invoice.tenant_id } });
-        const year = new Date().getFullYear();
-        invoice.invoice_number = `INV-${year}-${String(count + 1).padStart(6, '0')}`;
-      }
-    }
-  }
+
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+
+  underscored: true
 });
 
-Invoice.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
-Invoice.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
-Tenant.hasMany(Invoice, { foreignKey: 'tenant_id', as: 'invoices' });
+Invoice.belongsTo(Template, {
+  foreignKey: 'template_id',
+  as: 'template'
+});
+
+Template.hasMany(Invoice, {
+  foreignKey: 'template_id',
+  as: 'invoices'
+});
 
 module.exports = Invoice;

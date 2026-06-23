@@ -1,124 +1,106 @@
-const { validationResult } = require('express-validator');
-const Invoice = require('../models/Invoice');
-const Tenant = require('../models/Tenant');
-const User = require('../models/User');
-const sequelize = require('../config/database');
+// controllers/invoiceController.js - Fixed: company details now come from Template join
+// Items handling supports BOTH cases:
+//   A) items stored as JSON column directly on Invoice (default assumption here)
+//   B) items stored in a separate InvoiceItem table (see commented include below)
 
-// @desc    Create invoice
-// @route   POST /api/invoices
-// @access  Private
-const createInvoice = async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-    
-    const { 
-      client_name, 
-      client_email, 
-      client_company,
-      client_address,
-      client_gst,
-      amount,
-      tax_amount,
-      items,
-      due_date,
-      notes
-    } = req.body;
-    
-    // Calculate total amount
-    const total_amount = parseFloat(amount) + parseFloat(tax_amount || 0);
-    
-    const invoice = await Invoice.create({
-      client_name,
-      client_email,
-      client_company,
-      client_address,
-      client_gst,
-      amount,
-      tax_amount: tax_amount || 0,
-      total_amount,
-      items: items || [],
-      due_date,
-      notes,
-      tenant_id: req.user.tenant_id,
-      created_by: req.user.id
-    });
-    
-    res.status(201).json({
-      success: true,
-      data: invoice
-    });
-  } catch (error) {
-    console.error('Create invoice error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
+const { Op } = require('sequelize');
+const Invoice = require('../models/Invoice');
+const Template = require('../models/Template');
+// const InvoiceItem = require('../models/InvoiceItem'); // uncomment if items is a separate table
+
+// ============ HELPER: merge company info from Template into the invoice payload ============
+const attachTemplateData = (invoiceJson) => {
+  const template = invoiceJson.template || {};
+
+  return {
+    ...invoiceJson,
+
+    // ⭐ THIS is the main fix — company details were never on the invoice row,
+    // they live on the Template. Pull them in here so the frontend always
+    // gets company_name / company_details regardless of which screen renders it.
+    company_name: template.company_name || '',
+    company_logo_url: template.company_logo_url || '',
+    company_details: template.company_details || {},
+
+    // Styling so InvoicePreview.jsx renders with the right look immediately
+    colors: template.colors || null,
+    typography: template.typography || null,
+    sections: template.sections || null,
+    layout: template.layout || 'modern',
+    invoice_title: template.invoice_title || 'INVOICE',
+
+    // keep the raw template object too, in case the frontend wants it directly
+    template: undefined // remove nested duplicate to keep payload clean
+  };
 };
 
-// @desc    Get all invoices for tenant
+// @desc    Get all invoices
 // @route   GET /api/invoices
 // @access  Private
-const getInvoices = async (req, res) => {
+exports.getInvoices = async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 10, 
-      status, 
+    const { tenant_id } = req.user;
+
+    const {
+      page = 1,
+      limit = 10,
       search,
-      from_date,
-      to_date,
-      sort_by = 'created_at',
-      sort_order = 'DESC'
+      status,
+      sortBy = 'created_at',
+      sortOrder = 'DESC'
     } = req.query;
-    
+
     const offset = (page - 1) * limit;
-    let where = { tenant_id: req.user.tenant_id };
-    
-    // Filter by status
-    if (status && status !== 'all') {
+    const where = { tenant_id };
+
+    if (status) {
       where.status = status;
     }
-    
-    // Search by client name or invoice number
+
     if (search) {
       where[Op.or] = [
+        { invoice_number: { [Op.like]: `%${search}%` } },
         { client_name: { [Op.like]: `%${search}%` } },
-        { invoice_number: { [Op.like]: `%${search}%` } }
+        { client_company: { [Op.like]: `%${search}%` } }
       ];
     }
-    
-    // Date range filter
-    if (from_date) {
-      where.created_at = { [Op.gte]: new Date(from_date) };
-    }
-    if (to_date) {
-      where.created_at = { ...where.created_at, [Op.lte]: new Date(to_date) };
-    }
-    
-    const invoices = await Invoice.findAndCountAll({
+
+    const { count, rows } = await Invoice.findAndCountAll({
       where,
+
+      include: [
+        {
+          model: Template,
+          as: 'template'
+        }
+      ],
+
+      order: [['created_at', 'DESC']],
+
       limit: parseInt(limit),
-      offset: parseInt(offset),
-      order: [[sort_by, sort_order]],
-      attributes: { exclude: ['items'] } // Exclude heavy items data for list
+      offset: parseInt(offset)
     });
-    
-    res.json({
+
+    const data = rows.map(invoice =>
+      attachTemplateData(invoice.toJSON())
+    );
+
+    res.status(200).json({
       success: true,
-      count: invoices.count,
-      totalPages: Math.ceil(invoices.count / limit),
+      count: data.length,
+      totalPages: Math.ceil(count / limit),
       currentPage: parseInt(page),
-      data: invoices.rows
+      limit: parseInt(limit),
+      data
     });
+
   } catch (error) {
     console.error('Get invoices error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch invoices',
+      error: error.message
     });
   }
 };
@@ -126,43 +108,137 @@ const getInvoices = async (req, res) => {
 // @desc    Get single invoice
 // @route   GET /api/invoices/:id
 // @access  Private
-const getInvoice = async (req, res) => {
+exports.getInvoiceById = async (req, res) => {
   try {
+    const { id } = req.params;
+    const { tenant_id } = req.user;
+
     const invoice = await Invoice.findOne({
-      where: {
-        id: req.params.id,
-        tenant_id: req.user.tenant_id
-      },
+      where: { id, tenant_id },
       include: [
-        { 
-          model: User, 
-          as: 'creator', 
-          attributes: ['id', 'name', 'email'] 
-        },
-        {
-          model: Tenant,
-          as: 'tenant',
-          attributes: ['id', 'organization_name', 'gst_number', 'logo_url']
-        }
+        { model: Template, as: 'template' }
+        // { model: InvoiceItem, as: 'items' } // uncomment if items is a separate table
       ]
     });
-    
+
     if (!invoice) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Invoice not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Invoice not found'
       });
     }
-    
-    res.json({
+
+    const data = attachTemplateData(invoice.toJSON());
+
+    res.status(200).json({
       success: true,
-      data: invoice
+      data
     });
   } catch (error) {
     console.error('Get invoice error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch invoice',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Create invoice
+// @route   POST /api/invoices
+// @access  Private
+exports.createInvoice = async (req, res) => {
+  try {
+    const { tenant_id, id: user_id } = req.user;
+    const {
+      invoice_number,
+      template_id,
+      client_name,
+      client_email,
+      client_company,
+      client_address,
+      client_gst,
+      client_phone,
+      items, // expect an array here from the frontend
+      amount,
+      subtotal,
+      tax_rate,
+      tax_amount,
+      discount,
+      discount_amount,
+      taxable_value,
+      shipping_charge,
+      total_amount,
+      currency,
+      place_of_supply,
+      shipping_address,
+      terms,
+      notes,
+      status,
+      due_date,
+      issue_date,
+      upi_id,
+      upi_payee_name,
+      upi_description
+    } = req.body;
+
+    if (!invoice_number) {
+      return res.status(400).json({ success: false, message: 'Invoice number is required' });
+    }
+
+    const invoiceData = {
+      tenant_id,
+      created_by: user_id,
+      invoice_number,
+      template_id: template_id || null,
+      client_name: client_name || '',
+      client_email: client_email || '',
+      client_company: client_company || '',
+      client_address: typeof client_address === 'object' ? JSON.stringify(client_address) : (client_address || ''),
+      client_gst: client_gst || '',
+      client_phone: client_phone || '',
+      items: Array.isArray(items) ? items : [], // ⭐ make sure items actually get saved
+      amount: amount || 0,
+      subtotal: subtotal || 0,
+      tax_rate: tax_rate ?? 18,
+      tax_amount: tax_amount || 0,
+      discount: discount || 0,
+      discount_amount: discount_amount || 0,
+      taxable_value: taxable_value || 0,
+      shipping_charge: shipping_charge || 0,
+      total_amount: total_amount || 0,
+      currency: currency || 'INR',
+      place_of_supply: place_of_supply || '',
+      shipping_address: typeof shipping_address === 'object' ? JSON.stringify(shipping_address) : (shipping_address || ''),
+      terms: terms || '',
+      notes: notes || '',
+      status: status || 'draft',
+      due_date: due_date || null,
+      issue_date: issue_date || new Date(),
+      upi_id: upi_id || null,
+      upi_payee_name: upi_payee_name || '',
+      upi_description: upi_description || 'Invoice payment'
+    };
+
+    const invoice = await Invoice.create(invoiceData);
+
+    // re-fetch with template included so the response matches getInvoiceById shape
+    const fullInvoice = await Invoice.findOne({
+      where: { id: invoice.id },
+      include: [{ model: Template, as: 'template' }]
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Invoice created successfully',
+      data: attachTemplateData(fullInvoice.toJSON())
+    });
+  } catch (error) {
+    console.error('Create invoice error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create invoice',
+      error: error.message
     });
   }
 };
@@ -170,52 +246,48 @@ const getInvoice = async (req, res) => {
 // @desc    Update invoice
 // @route   PUT /api/invoices/:id
 // @access  Private
-const updateInvoice = async (req, res) => {
+exports.updateInvoice = async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      where: {
-        id: req.params.id,
-        tenant_id: req.user.tenant_id
-      }
-    });
-    
+    const { id } = req.params;
+    const { tenant_id } = req.user;
+
+    const invoice = await Invoice.findOne({ where: { id, tenant_id } });
+
     if (!invoice) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Invoice not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-    
-    // Don't allow editing paid invoices
-    if (invoice.status === 'paid') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Cannot edit paid invoice' 
-      });
+
+    const body = { ...req.body };
+
+    // normalize JSON-ish fields if sent as objects
+    if (body.client_address && typeof body.client_address === 'object') {
+      body.client_address = JSON.stringify(body.client_address);
     }
-    
-    const { amount, tax_amount, ...updateData } = req.body;
-    
-    // Recalculate total if amount or tax changes
-    if (amount !== undefined || tax_amount !== undefined) {
-      const newAmount = amount !== undefined ? amount : invoice.amount;
-      const newTax = tax_amount !== undefined ? tax_amount : invoice.tax_amount;
-      updateData.total_amount = parseFloat(newAmount) + parseFloat(newTax);
-      if (amount !== undefined) updateData.amount = amount;
-      if (tax_amount !== undefined) updateData.tax_amount = tax_amount;
+    if (body.shipping_address && typeof body.shipping_address === 'object') {
+      body.shipping_address = JSON.stringify(body.shipping_address);
     }
-    
-    await invoice.update(updateData);
-    
-    res.json({
+    if (body.items && !Array.isArray(body.items)) {
+      try { body.items = JSON.parse(body.items); } catch (e) { /* leave as-is */ }
+    }
+
+    await invoice.update(body);
+
+    const updatedInvoice = await Invoice.findOne({
+      where: { id },
+      include: [{ model: Template, as: 'template' }]
+    });
+
+    res.status(200).json({
       success: true,
-      data: invoice
+      message: 'Invoice updated successfully',
+      data: attachTemplateData(updatedInvoice.toJSON())
     });
   } catch (error) {
     console.error('Update invoice error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update invoice',
+      error: error.message
     });
   }
 };
@@ -223,206 +295,34 @@ const updateInvoice = async (req, res) => {
 // @desc    Delete invoice
 // @route   DELETE /api/invoices/:id
 // @access  Private
-const deleteInvoice = async (req, res) => {
+exports.deleteInvoice = async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      where: {
-        id: req.params.id,
-        tenant_id: req.user.tenant_id
-      }
-    });
-    
+    const { id } = req.params;
+    const { tenant_id } = req.user;
+
+    const invoice = await Invoice.findOne({ where: { id, tenant_id } });
+
     if (!invoice) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Invoice not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-    
-    // Don't allow deleting paid invoices
-    if (invoice.status === 'paid') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Cannot delete paid invoice' 
-      });
-    }
-    
+
     await invoice.destroy();
-    
-    res.json({
-      success: true,
-      message: 'Invoice deleted successfully'
-    });
+
+    res.status(200).json({ success: true, message: 'Invoice deleted successfully' });
   } catch (error) {
     console.error('Delete invoice error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete invoice',
+      error: error.message
     });
   }
 };
 
-// @desc    Send invoice email
-// @route   POST /api/invoices/:id/send
-// @access  Private
-const sendInvoice = async (req, res) => {
-  try {
-    const invoice = await Invoice.findOne({
-      where: {
-        id: req.params.id,
-        tenant_id: req.user.tenant_id
-      },
-      include: [
-        { model: Tenant, as: 'tenant' },
-        { model: User, as: 'creator' }
-      ]
-    });
-    
-    if (!invoice) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Invoice not found' 
-      });
-    }
-    
-    // Here you would integrate email sending service
-    // For now, just mark as sent
-    if (invoice.status === 'draft') {
-      await invoice.update({ status: 'sent' });
-    }
-    
-    res.json({
-      success: true,
-      message: 'Invoice sent successfully',
-      data: invoice
-    });
-  } catch (error) {
-    console.error('Send invoice error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-};
-
-// @desc    Mark invoice as paid
-// @route   PUT /api/invoices/:id/paid
-// @access  Private
-const markAsPaid = async (req, res) => {
-  try {
-    const invoice = await Invoice.findOne({
-      where: {
-        id: req.params.id,
-        tenant_id: req.user.tenant_id
-      }
-    });
-    
-    if (!invoice) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Invoice not found' 
-      });
-    }
-    
-    await invoice.update({
-      status: 'paid',
-      paid_at: new Date()
-    });
-    
-    res.json({
-      success: true,
-      message: 'Invoice marked as paid',
-      data: invoice
-    });
-  } catch (error) {
-    console.error('Mark as paid error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-};
-
-// @desc    Get invoice statistics
-// @route   GET /api/invoices/stats/summary
-// @access  Private
-const getInvoiceStats = async (req, res) => {
-  try {
-    const { period = 'month' } = req.query;
-    
-    let dateFilter = {};
-    const now = new Date();
-    
-    if (period === 'week') {
-      const weekAgo = new Date(now.setDate(now.getDate() - 7));
-      dateFilter = { created_at: { [Op.gte]: weekAgo } };
-    } else if (period === 'month') {
-      const monthAgo = new Date(now.setMonth(now.getMonth() - 1));
-      dateFilter = { created_at: { [Op.gte]: monthAgo } };
-    } else if (period === 'year') {
-      const yearAgo = new Date(now.setFullYear(now.getFullYear() - 1));
-      dateFilter = { created_at: { [Op.gte]: yearAgo } };
-    }
-    
-    const stats = await Invoice.findAll({
-      where: {
-        tenant_id: req.user.tenant_id,
-        ...dateFilter
-      },
-      attributes: [
-        'status',
-        [sequelize.fn('COUNT', sequelize.col('id')), 'count'],
-        [sequelize.fn('SUM', sequelize.col('total_amount')), 'total']
-      ],
-      group: ['status']
-    });
-    
-    let totalRevenue = 0;
-    let paidCount = 0;
-    let pendingCount = 0;
-    let overdueCount = 0;
-    
-    stats.forEach(stat => {
-      const total = parseFloat(stat.dataValues.total || 0);
-      const count = parseInt(stat.dataValues.count);
-      
-      totalRevenue += total;
-      
-      if (stat.status === 'paid') {
-        paidCount = count;
-      } else if (stat.status === 'overdue') {
-        overdueCount = count;
-      } else if (stat.status !== 'cancelled') {
-        pendingCount += count;
-      }
-    });
-    
-    res.json({
-      success: true,
-      data: {
-        total_revenue: totalRevenue,
-        paid_invoices: paidCount,
-        pending_invoices: pendingCount,
-        overdue_invoices: overdueCount,
-        breakdown: stats
-      }
-    });
-  } catch (error) {
-    console.error('Get invoice stats error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-};
-
-module.exports = { 
-  createInvoice, 
-  getInvoices, 
-  getInvoice, 
-  updateInvoice, 
-  deleteInvoice,
-  sendInvoice,
-  markAsPaid,
-  getInvoiceStats
+module.exports = {
+  getInvoices: exports.getInvoices,
+  getInvoiceById: exports.getInvoiceById,
+  createInvoice: exports.createInvoice,
+  updateInvoice: exports.updateInvoice,
+  deleteInvoice: exports.deleteInvoice
 };
