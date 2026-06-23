@@ -2,21 +2,25 @@ const express = require('express');
 const { body } = require('express-validator');
 const multer = require('multer');
 const path = require('path');
-const { 
+const { protect, adminOnly } = require('../middleware/auth');
+const {
   createOrUpdateTenant,
+  updateTenantById,
   getMyTenant,
   getTenantStatus,
-  updateTenantById
+  getAllTenants,
+  getTenantById,
+  deleteTenant,
+  getTenantStats
 } = require('../controllers/tenantController');
-const { protect, adminOnly } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Configure multer for memory storage (will upload to Supabase)
+// Configure multer for memory storage
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB limit
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|webp/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -29,19 +33,35 @@ const upload = multer({
   }
 });
 
-// All routes require authentication
+// ============ PUBLIC ROUTES (No auth required) ============
+// Remove these if you want all routes to be protected
+
+// ============ PROTECTED ROUTES (Auth required) ============
+// All routes below require authentication
 router.use(protect);
 
-// Get tenant status
+// GET /api/tenants - Get all tenants (admin only)
+router.get('/', adminOnly, getAllTenants);
+
+// GET /api/tenants/status - Get tenant status
 router.get('/status', getTenantStatus);
 
-// Get my tenant details
+// GET /api/tenants/me - Get my tenant details
 router.get('/me', getMyTenant);
 
-// Update tenant by ID with file upload support
+// GET /api/tenants/:id - Get tenant by ID
+router.get('/:id', getTenantById);
+
+// PUT /api/tenants/:id - Update tenant by ID
 router.put('/:id', upload.single('logo'), updateTenantById);
 
-// Create or update tenant with file upload support
+// DELETE /api/tenants/:id - Delete tenant (admin only)
+router.delete('/:id', adminOnly, deleteTenant);
+
+// GET /api/tenants/:id/stats - Get tenant stats
+router.get('/:id/stats', getTenantStats);
+
+// POST /api/tenants - Create or update tenant
 router.post(
   '/',
   upload.single('logo'),
